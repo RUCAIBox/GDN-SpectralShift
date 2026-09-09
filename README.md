@@ -15,7 +15,7 @@ SpectralShift adapts Gated DeltaNet (GDN) to longer contexts by reparameterizing
   </a>
 </p>
 
-**Overview of SpectralShift.** Alpha-projection reparameterization and learning-rate scaling reshape GDN's decay spectrum to support long-context retrieval. [Download the vector figure (PDF)](assets/SpectralShift_main.pdf).
+**Overview of SpectralShift.** Alpha-projection reparameterization and learning-rate scaling reshape GDN's decay spectrum to support long-context retrieval.
 
 This repository releases the method as **one focused Megatron-LM patch**. It contains the weight transformation, split input projections, fused forward/backward, per-projection optimizer learning-rate multipliers, and the checkpoint/DDP plumbing needed by those changes. The patch is extracted and adapted from the original training implementation.
 
