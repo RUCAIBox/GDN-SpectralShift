@@ -34,3 +34,8 @@ both fused-norm and plain projection module specs without CLI registration.
 The original training repository, its history, machine paths, model checkpoints,
 training data and manuscript PDF are not bundled. Source correspondence is
 recorded in docs/code_logic.md and docs/source_manifest.json.
+
+Paper materials: assets/SpectralShift_main.pdf is the author-provided SpectralShift
+overview figure. assets/spectralshift_overview.png is a raster rendering of that
+figure for GitHub display. README.md reproduces the numerical results of Table 3
+from the SpectralShift manuscript and credits the manuscript's authors.

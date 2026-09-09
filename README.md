@@ -5,9 +5,17 @@
 [![Megatron](https://img.shields.io/badge/Megatron--LM-runtime%20patch-76b900)](https://github.com/NVIDIA/Megatron-LM)
 [![License](https://img.shields.io/badge/License-BSD--3--Clause%20%2F%20Apache--2.0-blue)](NOTICE)
 
-[Patch](patches/megatron-spectralshift.patch) · [代码逻辑梳理（中文）](docs/code_logic.md) · [Base manifest](docs/base_manifest.json)
+[Main results](#main-results) · [Patch](patches/megatron-spectralshift.patch) · [代码逻辑梳理（中文）](docs/code_logic.md) · [Base manifest](docs/base_manifest.json)
 
 SpectralShift adapts Gated DeltaNet (GDN) to longer contexts by reparameterizing its alpha projection once before continued pretraining, then scaling that projection's learning rate during training.
+
+<p align="center">
+  <a href="assets/SpectralShift_main.pdf">
+    <img src="assets/spectralshift_overview.png" width="1000" alt="SpectralShift overview: Gated DeltaNet architecture, slow spectral propagation, and alpha-projection reparameterization with learning-rate scaling.">
+  </a>
+</p>
+
+**Overview of SpectralShift.** Alpha-projection reparameterization and learning-rate scaling reshape GDN's decay spectrum to support long-context retrieval. [Download the vector figure (PDF)](assets/SpectralShift_main.pdf).
 
 This repository releases the method as **one focused Megatron-LM patch**. It contains the weight transformation, split input projections, fused forward/backward, per-projection optimizer learning-rate multipliers, and the checkpoint/DDP plumbing needed by those changes. The patch is extracted and adapted from the original training implementation.
 
@@ -36,6 +44,66 @@ $$
 Centering and scaling $W_\alpha$ changes input-dependent forgetting. Retention can increase or decrease according to the sign of the centered projection; the method reshapes the slow/fast spectral structure rather than uniformly increasing every gate. Applying SpectralShift does not require an SVD.
 
 The paper uses the matrix mean and scales alpha's LR. Row centering and independent q/k/v/beta LR multipliers are additional options retained from the implementation.
+
+## Main results
+
+Table 3 of the paper reports general and retrieval evaluation for a **1.5B-A0.6B GDN-MoE** model. Continued pretraining starts from an 8K-context base model trained on 500B tokens, and extends the context to 32K, 64K or 128K. The staged **10B + 10B** curriculum first extends to 32K and then to the target context; **20B** denotes direct extension to the target context with the same total token budget.
+
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">Max. context</th>
+      <th rowspan="2">CPT tokens</th>
+      <th rowspan="2">Method</th>
+      <th rowspan="2">General avg.</th>
+      <th rowspan="2">DROP</th>
+      <th rowspan="2">RACE</th>
+      <th colspan="5">RULER</th>
+    </tr>
+    <tr><th>8K</th><th>16K</th><th>32K</th><th>64K</th><th>128K</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td rowspan="1">8K</td><td rowspan="1">—</td><td>Base Model</td><td>53.9</td><td>22.5</td><td>33.9</td><td>45.8</td><td>—</td><td>—</td><td>—</td><td>—</td>
+    </tr>
+    <tr>
+      <td rowspan="2">32K</td><td rowspan="2">10B</td><td>SpectralShift</td><td>53.1</td><td>21.5</td><td><strong>34.2</strong></td><td><strong>57.1</strong></td><td><strong>52.9</strong></td><td><strong>45.8</strong></td><td>—</td><td>—</td>
+    </tr>
+    <tr>
+      <td>Baseline</td><td><strong>53.5</strong></td><td><strong>22.3</strong></td><td>33.8</td><td>55.5</td><td>49.7</td><td>40.6</td><td>—</td><td>—</td>
+    </tr>
+    <tr>
+      <td rowspan="4">64K</td><td rowspan="2">10B + 10B</td><td>SpectralShift</td><td><strong>55.5</strong></td><td><ins>24.1</ins></td><td><strong>33.0</strong></td><td><ins>64.0</ins></td><td><ins>59.7</ins></td><td><ins>52.7</ins></td><td><ins>45.4</ins></td><td>—</td>
+    </tr>
+    <tr>
+      <td>Baseline</td><td>55.0</td><td>21.6</td><td>31.3</td><td>61.1</td><td>56.5</td><td>47.0</td><td>41.6</td><td>—</td>
+    </tr>
+    <tr>
+      <td rowspan="2">20B</td><td>SpectralShift</td><td><ins>54.3</ins></td><td><strong>24.3</strong></td><td><ins>32.4</ins></td><td><strong>64.6</strong></td><td>59.7</td><td><strong>54.3</strong></td><td><strong>48.4</strong></td><td>—</td>
+    </tr>
+    <tr>
+      <td>Baseline</td><td>53.2</td><td>23.0</td><td>32.1</td><td>64.2</td><td><strong>60.5</strong></td><td>53.9</td><td>46.4</td><td>—</td>
+    </tr>
+    <tr>
+      <td rowspan="4">128K</td><td rowspan="2">10B + 10B</td><td>SpectralShift</td><td><strong>54.5</strong></td><td><strong>23.3</strong></td><td><strong>33.4</strong></td><td><strong>64.6</strong></td><td><strong>60.1</strong></td><td><strong>56.7</strong></td><td><strong>49.9</strong></td><td><strong>44.6</strong></td>
+    </tr>
+    <tr>
+      <td>Baseline</td><td>53.7</td><td>20.7</td><td>32.4</td><td>64.3</td><td>57.2</td><td>51.9</td><td>45.4</td><td>43.1</td>
+    </tr>
+    <tr>
+      <td rowspan="2">20B</td><td>SpectralShift</td><td><ins>54.0</ins></td><td><ins>22.6</ins></td><td>31.7</td><td><ins>62.2</ins></td><td><ins>56.3</ins></td><td><ins>49.8</ins></td><td><ins>42.9</ins></td><td><ins>42.2</ins></td>
+    </tr>
+    <tr>
+      <td>Baseline</td><td>52.9</td><td>15.6</td><td><ins>33.1</ins></td><td>58.1</td><td>52.2</td><td>46.1</td><td>42.0</td><td>41.9</td>
+    </tr>
+  </tbody>
+</table>
+
+**Table 3.** General and retrieval evaluation under different context-extension settings. **Bold** marks the highest score within each maximum-context group; <ins>underlining</ins> marks the highest score within a curriculum pair when it is not already bold. “—” denotes an unreported result. General avg. covers MMLU, LAMBADA, ARC-Easy, WinoGrande and PiQA. All values are transcribed from the paper.
+
+- **32K extension:** RULER at 32K improves from **40.6 to 45.8** (+5.2 points).
+- **Staged 64K extension:** RULER at 32K improves from **47.0 to 52.7** (+5.7 points), and at 64K from **41.6 to 45.4** (+3.8 points).
+- **Staged 128K extension:** the mean over the five RULER evaluation lengths rises from **52.38 to 55.18** (+2.80 points; **+5.35%** relative), while General avg. rises from **53.7 to 54.5**.
 
 ## Patch contents
 

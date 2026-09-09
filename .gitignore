@@ -5,3 +5,4 @@ __pycache__/
 *.pth
 *.safetensors
 *.pdf
+!assets/SpectralShift_main.pdf
