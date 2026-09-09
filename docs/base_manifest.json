@@ -19,5 +19,20 @@
     "megatron/core/optimizer/__init__.py": "88caedfeabc3d271644b912f12a39f425b731bbb73299a4a8ada74447c666e3b",
     "megatron/training/training.py": "e5eac4c2b635b954fa7a88133c6333242bae12afc8d1196df6a9bef87a758f1d",
     "megatron/training/checkpointing.py": "7d4b910569f8ad4a18982827fdb64572d4ce46096156f356769ed54e5e6b0bf8"
+  },
+  "provenance_verification": {
+    "checked_at_utc": "2026-09-09T08:01:31.246100+00:00",
+    "public_commit_api": "https://api.github.com/repos/NVIDIA/Megatron-LM/commits/c7590d8c3733619efa87a1a0733ac4cceedc683a",
+    "commit_message": "ADLR/megatron-lm!4070 - [DEV] Support Qwen3next",
+    "git_tree_sha": "7450faf6f63344fcbceeaf059db959b67da32871",
+    "local_base_files_match_public_commit_tree": true,
+    "upstream_main_comparison": {
+      "html_url": "https://github.com/NVIDIA/Megatron-LM/compare/c7590d8c3733619efa87a1a0733ac4cceedc683a...main",
+      "status": "diverged",
+      "ahead_by": 2456,
+      "behind_by": 15
+    },
+    "merge_base_sha": "636179d75b6077648e7d3e7b670d24a97e5aff1d",
+    "interpretation": "This snapshot is publicly retrievable, but is not an ancestor of the upstream main observed in this audit. Patch compatibility is limited to this exact snapshot; no official release or upstream-main compatibility is asserted."
   }
 }

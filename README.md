@@ -63,9 +63,11 @@ The baseline LR scheduler already applies `group['lr'] = new_lr * group.get('lr_
 
 ## Megatron baseline
 
-The patch is based on the public NVIDIA/Megatron-LM commit:
+The patch targets the following exact Megatron source snapshot:
 
-**[`c7590d8c3733619efa87a1a0733ac4cceedc683a`](https://github.com/NVIDIA/Megatron-LM/commit/c7590d8c3733619efa87a1a0733ac4cceedc683a)** — the original single-file GDN implementation.
+**[`c7590d8c3733619efa87a1a0733ac4cceedc683a`](https://github.com/NVIDIA/Megatron-LM/commit/c7590d8c3733619efa87a1a0733ac4cceedc683a)** — `ADLR/megatron-lm!4070 - [DEV] Support Qwen3next`, which adds `megatron/core/ssm/gated_delta_net.py` as a single file.
+
+This snapshot is publicly retrievable through GitHub's NVIDIA/Megatron-LM commit endpoint. However, the [ancestry comparison with upstream `main`](https://github.com/NVIDIA/Megatron-LM/compare/c7590d8c3733619efa87a1a0733ac4cceedc683a...main) returned `diverged` during verification: this SHA is not an ancestor of the upstream `main` checked in that audit. Public availability alone does not establish membership in upstream `main` or an official release. Compatibility checks in this repository apply to this exact snapshot; see the provenance details in the [base manifest](docs/base_manifest.json).
 
 Apply the patch from a clean checkout of that revision. From the Megatron repository root, with this repository available as the sibling directory `../GDN-SpectralShift`:
 

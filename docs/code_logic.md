@@ -128,7 +128,9 @@ fusion 绕过了六个 projection 自己的 `forward`。如果只在这些模块
 
 ## 8. 边界与来源
 
-[base_manifest.json](base_manifest.json) 给出可公开获取的补丁基线及原文件 SHA-256。原逻辑提取自检查时的工作树，其 HEAD 为 `7d6b60342797e9ac808d9089608ee912915194ed`，包含本地修改；[source_manifest.json](source_manifest.json) 记录检查文件的 SHA-256，因此本文的原始行号以检查快照为准。
+[base_manifest.json](base_manifest.json) 给出补丁针对的确切快照及原文件 SHA-256。该 SHA 可通过 GitHub 的 NVIDIA/Megatron-LM commit API 获取，其提交消息为 `ADLR/megatron-lm!4070 - [DEV] Support Qwen3next`，新增了单文件 `gated_delta_net.py`。但补查上游 `main` 的祖先关系时，GitHub compare 返回 `diverged`：该 SHA 不是检查时上游 `main` 的祖先。公开可访问不等于属于上游 `main` 或正式发行版本；本仓库的适用性验证仅针对这个确切快照。
+
+公开 API 返回的 Git tree SHA 已与本地用于生成补丁的 commit tree 核对一致，六个基线文件的 SHA-256 也与该 tree 中的文件一致。原逻辑提取自检查时的工作树，其 HEAD 为 `7d6b60342797e9ac808d9089608ee912915194ed`，包含本地修改；[source_manifest.json](source_manifest.json) 记录检查文件的 SHA-256，因此本文的原始行号以检查快照为准。
 
 补丁没有纳入参数注册、实验配方、旧的 key/alpha 整体除法、A_log 平移、其他优化器、动态 CP/MoE dispatcher、训练日志或论文 PDF。它也没有为旧公开基线补齐现代 GDN 的 CP、packed sequence 或推理功能。
 
