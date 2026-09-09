@@ -1,0 +1,23 @@
+{
+  "base_repository": "https://github.com/NVIDIA/Megatron-LM",
+  "base_commit": "c7590d8c3733619efa87a1a0733ac4cceedc683a",
+  "source_revision": "7d6b60342797e9ac808d9089608ee912915194ed",
+  "note": "Extraction inspected the source working tree, which includes local modifications. No private source history is bundled.",
+  "patched_files": [
+    "megatron/core/distributed/distributed_data_parallel.py",
+    "megatron/core/models/gpt/linear_attention_module_specs.py",
+    "megatron/core/optimizer/__init__.py",
+    "megatron/core/ssm/gated_delta_net.py",
+    "megatron/training/checkpointing.py",
+    "megatron/training/gdn_spectralshift.py",
+    "megatron/training/training.py"
+  ],
+  "base_sha256": {
+    "megatron/core/ssm/gated_delta_net.py": "34627ca1bf622da34cf1bdd1bbfa3a291e0a75baf072d68be845376b3608fbfc",
+    "megatron/core/models/gpt/linear_attention_module_specs.py": "256910ccc61bc70e4d8d660900cb6aaf434760daae099aeee82636feefcfa6be",
+    "megatron/core/distributed/distributed_data_parallel.py": "1a16bef29fea639e23ecc2200cb5bd6d233e56e623d6613396b8166acc9b81cd",
+    "megatron/core/optimizer/__init__.py": "88caedfeabc3d271644b912f12a39f425b731bbb73299a4a8ada74447c666e3b",
+    "megatron/training/training.py": "e5eac4c2b635b954fa7a88133c6333242bae12afc8d1196df6a9bef87a758f1d",
+    "megatron/training/checkpointing.py": "7d4b910569f8ad4a18982827fdb64572d4ce46096156f356769ed54e5e6b0bf8"
+  }
+}

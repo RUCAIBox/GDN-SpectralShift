@@ -1,0 +1,794 @@
+diff --git a/megatron/core/distributed/distributed_data_parallel.py b/megatron/core/distributed/distributed_data_parallel.py
+--- a/megatron/core/distributed/distributed_data_parallel.py
++++ b/megatron/core/distributed/distributed_data_parallel.py
+@@ -369,9 +369,65 @@
+             self.ddp_config.use_distributed_optimizer and self.ddp_config.overlap_param_gather
+         )
+         self.remove_forward_pre_hook_handles = {}
++        self._extra_param_gather_bucket_groups = {}
+         if self.use_forward_hook:
++            self._initialize_extra_param_gather_bucket_groups()
+             self.enable_forward_pre_hook()
+         self.overlap_param_gather_with_optimizer_step = False
++
++    def _initialize_extra_param_gather_bucket_groups(self):
++        """Validate opt-in functional parameter use and cache its gather bucket chain."""
++        module_names = {module: name for name, module in self.module.named_modules()}
++
++        for module in self.module.modules():
++            get_params = getattr(module, 'get_extra_ddp_param_gather_params', None)
++            if not callable(get_params):
++                continue
++
++            module_name = module_names.get(module, module.__class__.__name__) or '<root>'
++            direct_trainable = tuple(
++                parameter
++                for parameter in module.parameters(recurse=False)
++                if parameter.requires_grad
++            )
++            if direct_trainable:
++                raise RuntimeError(
++                    f"DDP extra param-gather boundary '{module_name}' must not own direct "
++                    "trainable parameters."
++                )
++
++            groups = []
++            seen_param_ids = set()
++            seen_group_ids = set()
++            for parameter in get_params():
++                if not isinstance(parameter, torch.nn.Parameter):
++                    raise TypeError(
++                        f"DDP extra param-gather boundary '{module_name}' returned "
++                        f"{type(parameter).__name__}; expected torch.nn.Parameter."
++                    )
++                if id(parameter) in seen_param_ids:
++                    continue
++                seen_param_ids.add(id(parameter))
++                if not parameter.requires_grad:
++                    continue
++
++                bucket_group = self.param_to_bucket_group.get(parameter)
++                if bucket_group is None:
++                    raise RuntimeError(
++                        "Trainable parameter declared by DDP extra param-gather boundary "
++                        f"'{module_name}' is absent from param_to_bucket_group."
++                    )
++                if id(bucket_group) not in seen_group_ids:
++                    seen_group_ids.add(id(bucket_group))
++                    groups.append(bucket_group)
++
++            for previous, current in zip(groups, groups[1:]):
++                if previous.next_param_gather_bucket_group is not current:
++                    raise RuntimeError(
++                        "Bucket groups declared by DDP extra param-gather boundary "
++                        f"'{module_name}' are not contiguous in parameter all-gather order."
++                    )
++            self._extra_param_gather_bucket_groups[module] = tuple(groups)
+ 
+     def enable_forward_pre_hook(self):
+         """
+@@ -408,6 +464,19 @@
+         when a module uses a parameter in a bucket with a still incomplete all-gather).
+         """
+ 
++        def finish_bucket_group(bucket_group, base_skip_next_bucket_dispatch):
++            next_group = bucket_group.next_param_gather_bucket_group
++            completed_next_group = (
++                next_group is not None
++                and next_group.param_gather_dispatched
++                and next_group.param_gather_handle is None
++            )
++            bucket_group.finish_param_sync(
++                skip_next_bucket_dispatch=(
++                    base_skip_next_bucket_dispatch or completed_next_group
++                )
++            )
++
+         def hook(module, *unused):
+             assert (
+                 self.use_forward_hook
+@@ -415,6 +484,15 @@
+ 
+             if is_graph_capturing():
+                 return
++
++            # If aligning param all-gather across pipeline stages, all-gather is dispatched
++            # by start_param_sync calls in core/pipeline_parallelism/schedules.py.
++            # If overlapping param all-gather with optimizer step, then all-gather has
++            # already been dispatched in optimizer step.
++            base_skip_next_bucket_dispatch = (
++                self.ddp_config.align_param_gather
++                or self.overlap_param_gather_with_optimizer_step
++            )
+ 
+             # Make sure all parameters in this module have been all-gathered as necessary.
+             for param in module.parameters(recurse=False):
+@@ -424,17 +502,12 @@
+                     continue
+                 assert param.requires_grad
+ 
+-                # If aligning param all-gather across pipeline stages, all-gather is dispatched
+-                # by start_param_sync calls in core/pipeline_parallelism/schedules.py.
+-                # If overlapping param all-gather with optimizer step, then all-gather has
+-                # already been dispatched in optimizer step.
+-                skip_next_bucket_dispatch = (
+-                    self.ddp_config.align_param_gather
+-                    or self.overlap_param_gather_with_optimizer_step
++                finish_bucket_group(
++                    self.param_to_bucket_group[param], base_skip_next_bucket_dispatch
+                 )
+-                self.param_to_bucket_group[param].finish_param_sync(
+-                    skip_next_bucket_dispatch=skip_next_bucket_dispatch
+-                )
++
++            for bucket_group in self._extra_param_gather_bucket_groups.get(module, ()):
++                finish_bucket_group(bucket_group, base_skip_next_bucket_dispatch)
+ 
+         return hook
+ 
+diff --git a/megatron/core/models/gpt/linear_attention_module_specs.py b/megatron/core/models/gpt/linear_attention_module_specs.py
+--- a/megatron/core/models/gpt/linear_attention_module_specs.py
++++ b/megatron/core/models/gpt/linear_attention_module_specs.py
+@@ -29,6 +29,8 @@
+             module=GatedDeltaNet,
+             submodules=GatedDeltaNetSubmodules(
+                 in_proj=backend.column_parallel_layer_norm_linear(),
++                split_in_proj=backend.column_parallel_linear(),
++                in_proj_layer_norm=backend.layer_norm(rms_norm=rms_norm, for_qk=False),
+                 out_norm=backend.layer_norm(rms_norm=rms_norm, for_qk=False),
+                 out_proj=backend.row_parallel_linear(),
+             ),
+diff --git a/megatron/core/optimizer/__init__.py b/megatron/core/optimizer/__init__.py
+--- a/megatron/core/optimizer/__init__.py
++++ b/megatron/core/optimizer/__init__.py
+@@ -1,5 +1,6 @@
+ # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+ import logging
++import math
+ import warnings
+ from typing import Callable, Dict, List, Optional, Tuple
+ 
+@@ -114,19 +115,20 @@
+                     or (default_skip_embedding_weight_decay and "embedding" in name)
+                 )
+ 
+-            if scale_lr_cond is not None:
+-                scale_lr = scale_lr_cond(name, param)
++            scale_lr = scale_lr_cond(name, param) if scale_lr_cond is not None else False
++            if isinstance(scale_lr, bool):
++                _lr_mult = lr_mult if scale_lr else 1.0
++            elif scale_lr is None:
++                _lr_mult = 1.0
+             else:
+-                scale_lr = False
+-
+-            if not no_wd and not scale_lr:
+-                wd_mult, _lr_mult = 1.0, 1.0
+-            elif not no_wd and scale_lr:
+-                wd_mult, _lr_mult = 1.0, lr_mult
+-            elif no_wd and not scale_lr:
+-                wd_mult, _lr_mult = 0.0, 1.0
+-            else:
+-                wd_mult, _lr_mult = 0.0, lr_mult
++                _lr_mult = float(scale_lr)
++                if not math.isfinite(_lr_mult) or _lr_mult < 0.0:
++                    raise ValueError(
++                        f"scale_lr_cond for parameter {name} returned invalid "
++                        f"learning-rate multiplier: {scale_lr!r}"
++                    )
++
++            wd_mult = 0.0 if no_wd else 1.0
+ 
+             is_decoupled_lr = False
+             # For input/embedding and output layer: embedding.word_embeddings.weight /
+diff --git a/megatron/core/ssm/gated_delta_net.py b/megatron/core/ssm/gated_delta_net.py
+--- a/megatron/core/ssm/gated_delta_net.py
++++ b/megatron/core/ssm/gated_delta_net.py
+@@ -6,6 +6,7 @@
+ # LICENSE file in the root directory of this source tree.
+ 
+ import logging
++import math
+ from dataclasses import dataclass, replace
+ from typing import List, Optional, Tuple, Union
+ 
+@@ -62,8 +63,126 @@
+     """
+ 
+     in_proj: Union[ModuleSpec, type] = IdentityOp
++    split_in_proj: Union[ModuleSpec, type] = IdentityOp
++    in_proj_layer_norm: Union[ModuleSpec, type] = IdentityOp
+     out_norm: Union[ModuleSpec, type] = IdentityOp
+     out_proj: Union[ModuleSpec, type] = IdentityOp
++
++
++class _FusedSplitLinearFunc(torch.autograd.Function):
++    """Fuse split projections without retaining a materialized fused weight.
++
++    ``torch.nn.functional.linear(input, torch.cat(weights))`` saves the newly
++    concatenated weight for backward.  At formal-model scale that leaves one
++    extra fused projection weight live per GDN layer and consumes the CUDA
++    headroom needed by NCCL.  This function instead saves references to the
++    owning weights and reconstructs the fused weight during backward.
++
++    Under Megatron DDP, gradients are accumulated directly into ``main_grad``
++    and dtype-compatible dummy tensors are returned so the standard parameter
++    AccumulateGrad/DDP hooks still launch gradient buckets.  Standalone callers
++    without ``main_grad`` receive ordinary autograd gradients.
++    """
++
++    @staticmethod
++    def forward(ctx, inputs, num_weights, *parameters):
++        weights = parameters[:num_weights]
++        biases = parameters[num_weights:]
++        fused_weight = torch.cat(weights, dim=0)
++        fused_bias = torch.cat(biases, dim=0) if biases else None
++
++        ctx.num_weights = num_weights
++        ctx.has_bias = bool(biases)
++        ctx.weight_splits = tuple(weight.shape[0] for weight in weights)
++        ctx.save_for_backward(inputs, *weights, *biases)
++        return torch.nn.functional.linear(inputs, fused_weight, fused_bias)
++
++    @staticmethod
++    def backward(ctx, grad_output):
++        inputs = ctx.saved_tensors[0]
++        weights = ctx.saved_tensors[1 : 1 + ctx.num_weights]
++        biases = ctx.saved_tensors[1 + ctx.num_weights :]
++        fused_weight = torch.cat(weights, dim=0)
++
++        grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])
++        # The formal CP layout can expose grad_output as [tokens, 1, output].
++        # Calling matmul on that rank-3 tensor makes PyTorch broadcast the
++        # weight and launch a tokens-way stride-zero bmm.  This is one GEMM
++        # mathematically; flatten the leading dimensions explicitly and then
++        # restore the input shape.
++        grad_inputs = grad_output_2d.matmul(fused_weight).reshape_as(inputs)
++        inputs_2d = inputs.reshape(-1, inputs.shape[-1])
++        grad_fused_weight = grad_output_2d.t().matmul(inputs_2d)
++        grad_weights = grad_fused_weight.split(ctx.weight_splits, dim=0)
++
++        grad_biases = ()
++        if ctx.has_bias:
++            grad_fused_bias = grad_output_2d.sum(dim=0)
++            grad_biases = grad_fused_bias.split(ctx.weight_splits, dim=0)
++
++        parameter_grads = []
++        for parameter, parameter_grad in zip(
++            (*weights, *biases), (*grad_weights, *grad_biases)
++        ):
++            main_grad = getattr(parameter, "main_grad", None)
++            if isinstance(main_grad, torch.Tensor):
++                main_grad.add_(parameter_grad)
++                parameter.grad_added_to_main_grad = True
++                if getattr(parameter, "zero_out_wgrad", False):
++                    dummy_grad = torch.zeros_like(parameter)
++                else:
++                    dummy_grad = torch.empty_like(parameter)
++                parameter_grads.append(dummy_grad)
++            else:
++                parameter_grads.append(parameter_grad)
++
++        return (grad_inputs, None, *parameter_grads)
++
++class _FusedSplitLinearBoundary(torch.nn.Module):
++    """Parameterless execution boundary for the six split GDN input projections."""
++
++    def __init__(self, projections):
++        super().__init__()
++        projections = tuple(projections)
++        if not projections:
++            raise ValueError("Fused split GDN boundary requires at least one projection.")
++        object.__setattr__(self, "_projection_refs", projections)
++
++    def get_extra_ddp_param_gather_params(self):
++        params = []
++        for projection in self._projection_refs:
++            params.append(projection.weight)
++            bias = getattr(projection, "bias", None)
++            if bias is not None and bias.numel() != 0:
++                params.append(bias)
++        return tuple(params)
++
++    def forward(self, inputs):
++        weights = [projection.weight for projection in self._projection_refs]
++        biases = [
++            None
++            if getattr(projection, "bias", None) is None or projection.bias.numel() == 0
++            else projection.bias
++            for projection in self._projection_refs
++        ]
++        if any(bias is not None for bias in biases) and not all(
++            bias is not None for bias in biases
++        ):
++            raise RuntimeError(
++                "Split GDN fused-forward expects either all split projections to have bias "
++                "or none of them."
++            )
++        fused_output_size = sum(weight.shape[0] for weight in weights)
++        fused_bias_size = (
++            sum(bias.shape[0] for bias in biases) if biases[0] is not None else None
++        )
++        if fused_bias_size is not None and fused_bias_size != fused_output_size:
++            raise RuntimeError(
++                "Split GDN fused-forward bias size mismatch: "
++                f"bias=({fused_bias_size},) weight=({fused_output_size}, {weights[0].shape[1]})"
++            )
++        tensor_biases = [] if fused_bias_size is None else biases
++        return _FusedSplitLinearFunc.apply(inputs, len(weights), *weights, *tensor_biases)
+ 
+ 
+ class GatedDeltaNet(MegatronModule):
+@@ -140,19 +259,75 @@
+                 "For FP8, the innermost dimension of the GDN layer "
+                 "input projection output tensor must be a multiple of 16."
+             )
+-        self.in_proj = build_module(
+-            submodules.in_proj,
+-            self.hidden_size,
+-            self.in_proj_dim,
+-            config=self.config,
+-            init_method=self.config.init_method,
+-            gather_output=False,
+-            bias=bias,
+-            skip_bias_add=False,
+-            is_expert=False,
+-            tp_comm_buffer_name="fc1",
+-            tp_group=self.pg_collection.tp,
+-        )
++        # When --gdn-split-in-proj is enabled, build 6 independent ColumnParallelLinear
++        # (q/k/v/z/b/a). They are exposed under a virtual `in_proj.weight.<name>` key in
++        # sharded_state_dict so distcp interchange with non-split ckpts works in both directions.
++        self.split_in_proj = bool(getattr(self.config, "gdn_split_in_proj", False))
++        if self.split_in_proj:
++            assert self.tp_size == 1, (
++                "--gdn-split-in-proj currently requires TP=1; got tp_size="
++                f"{self.tp_size}. Per-section TP sharding semantics need extra plumbing."
++            )
++            _ln_spec = submodules.in_proj_layer_norm
++            self.in_proj_layer_norm = build_module(
++                _ln_spec,
++                config=self.config,
++                hidden_size=self.hidden_size,
++                eps=self.config.layernorm_epsilon,
++            )
++            _split_specs = [
++                ("q_proj", self.qk_dim),
++                ("k_proj", self.qk_dim),
++                ("v_proj", self.v_dim),
++                ("z_proj", self.v_dim),
++                ("b_proj", self.num_value_heads),
++                ("a_proj", self.num_value_heads),
++            ]
++            self._split_proj_names = [n for n, _ in _split_specs]
++            self._split_gate_index = self._split_proj_names.index("z_proj")
++            self._split_proj_dims = [d for _, d in _split_specs]
++            self._split_proj_to_ckpt_name = {
++                "q_proj": "query",
++                "k_proj": "key",
++                "v_proj": "value",
++                "z_proj": "z",
++                "b_proj": "beta",
++                "a_proj": "alpha",
++            }
++            for name, out_dim in _split_specs:
++                proj = build_module(
++                    submodules.split_in_proj,
++                    self.hidden_size,
++                    out_dim,
++                    config=self.config,
++                    init_method=self.config.init_method,
++                    gather_output=False,
++                    bias=bias,
++                    skip_bias_add=False,
++                    is_expert=False,
++                    tp_comm_buffer_name="fc1",
++                    tp_group=self.pg_collection.tp,
++                )
++                setattr(self, name, proj)
++            if getattr(self.config, "gdn_fused_split_forward", False):
++                self._fused_split_linear = _FusedSplitLinearBoundary(
++                    tuple(getattr(self, name) for name in self._split_proj_names)
++                )
++            self.in_proj = None
++        else:
++            self.in_proj = build_module(
++                submodules.in_proj,
++                self.hidden_size,
++                self.in_proj_dim,
++                config=self.config,
++                init_method=self.config.init_method,
++                gather_output=False,
++                bias=bias,
++                skip_bias_add=False,
++                is_expert=False,
++                tp_comm_buffer_name="fc1",
++                tp_group=self.pg_collection.tp,
++            )
+ 
+         # Conv1d for QKV
+         self.conv_dim = self.qk_dim * 2 + self.v_dim
+@@ -220,6 +395,49 @@
+         # TODO: support CP
+ 
+         self.reset_parameters()
++
++    @staticmethod
++    @torch.no_grad()
++    def _apply_centered_weight_scale_(weight: nn.Parameter, scale: float, mode: str) -> None:
++        """Apply ``W = mean(W) + scale * (W - mean(W))`` in fp32."""
++        scale = float(scale)
++        if scale == 1.0:
++            return
++        if not math.isfinite(scale) or scale < 0.0:
++            raise ValueError(f"GDN centered weight scale must be finite and >= 0, got {scale}")
++
++        weight_fp32 = weight.data.float()
++        if mode == "matrix":
++            center = weight_fp32.mean()
++        elif mode == "row":
++            if weight_fp32.dim() != 2:
++                raise ValueError(
++                    f"GDN row-centered weight scale expects a 2D weight, got {weight_fp32.shape}"
++                )
++            center = weight_fp32.mean(dim=1, keepdim=True)
++        else:
++            raise ValueError(f"GDN centered weight scale mode must be matrix or row, got {mode!r}")
++
++        scaled = center + scale * (weight_fp32 - center)
++        weight.data.copy_(scaled.to(dtype=weight.data.dtype))
++
++    def apply_split_alpha_weight_scale(
++        self, alpha_scale: float = 1.0, mode: str = "matrix"
++    ) -> None:
++        """Centered-scale the split alpha projection once after checkpoint load."""
++        alpha_scale = float(alpha_scale)
++        if alpha_scale == 1.0:
++            return
++        if not self.split_in_proj:
++            raise RuntimeError(
++                "--gdn-alpha-weight-scale requires --gdn-split-in-proj; non-split GDN "
++                "does not expose a standalone a_proj.weight."
++            )
++        if self.tp_size != 1:
++            raise RuntimeError(
++                f"--gdn-alpha-weight-scale currently requires TP=1, got {self.tp_size}"
++            )
++        self._apply_centered_weight_scale_(self.a_proj.weight, alpha_scale, mode)
+ 
+     def reset_parameters(self):
+         """Reset the parameters."""
+@@ -303,7 +521,16 @@
+ 
+         # Input projection
+         nvtx_range_push(suffix="in_proj")
+-        qkvzba, _ = self.in_proj(hidden_states)
++        if self.split_in_proj:
++            normed = self.in_proj_layer_norm(hidden_states)
++            if getattr(self.config, "gdn_fused_split_forward", False):
++                qkvzba = self._fused_split_linear(normed)
++            else:
++                qkvzba = torch.cat(
++                    [getattr(self, name)(normed)[0] for name in self._split_proj_names], dim=-1
++                )
++        else:
++            qkvzba, _ = self.in_proj(hidden_states)
+         nvtx_range_pop(suffix="in_proj")
+ 
+         # Transpose: s b x --> b s x
+@@ -412,6 +639,32 @@
+         y = y * self.act_fn(gate.float())
+         y = y.to(x_dtype)
+         return y
++
++    def backward_dw(self):
++        """Compute delayed projection weight gradients in backward dependency order."""
++        if not self.config.delay_wgrad_compute:
++            return
++
++        self.out_proj.backward_dw()
++        if self.split_in_proj:
++            fused_split_forward = getattr(self.config, 'gdn_fused_split_forward', False)
++            for proj_name in reversed(self._split_proj_names):
++                projection = getattr(self, proj_name)
++                if fused_split_forward:
++                    # The fused split path calls torch.nn.functional.linear on
++                    # concatenated weights, so autograd has already produced
++                    # each input-projection wgrad and no TE wgrad-store entry
++                    # exists to pop.  DDP registered its accumulation/reduce
++                    # hooks on the TE wrapper because delayed wgrad is enabled;
++                    # run those hooks at the same delayed dependency point.
++                    for hook in getattr(
++                        projection, "wgrad_accumulation_and_reduce_hooks", ()
++                    ):
++                        hook()
++                else:
++                    projection.backward_dw()
++        else:
++            self.in_proj.backward_dw()
+ 
+     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+         """Provide a sharded state dictionary for distributed checkpointing."""
+@@ -427,8 +680,14 @@
+             },  # parameters sharded across TP
+             sharded_offsets=sharded_offsets,
+         )
+-        # Submodules
++        # Split owners are remapped below; retain their Parameter identities.
++        skip_split_children = (
++            set(self._split_proj_names) | {"in_proj_layer_norm"}
++            if self.split_in_proj else set()
++        )
+         for name, module in self.named_children():
++            if name in skip_split_children:
++                continue
+             if name == "conv1d":
+                 # Add TP sharding for Conv1d
+                 module_sd = module.state_dict(prefix="", keep_vars=True)
+@@ -445,27 +704,74 @@
+ 
+             sharded_state_dict.update(module_sharded_sd)
+ 
+-        # At this point the TP sharding is correctly defined for each tensor, but some of the
+-        # tensors must be additionally split into separate parts
+-        in_proj_dim_local_tp = self.in_proj_dim // self.tp_size
+-        assert sharded_state_dict[f"{prefix}in_proj.weight"].data.size(0) == in_proj_dim_local_tp, (
+-            in_proj_dim_local_tp,
+-            sharded_state_dict[f"{prefix}in_proj.weight"],
+-        )
+-
+-        sharded_state_dict[f"{prefix}in_proj.weight"] = _split_tensor_factory(
+-            sharded_state_dict[f"{prefix}in_proj.weight"],
+-            [
+-                self.qk_dim // self.tp_size,
+-                self.qk_dim // self.tp_size,
+-                self.v_dim // self.tp_size,
+-                self.v_dim // self.tp_size,
+-                self.num_value_heads // self.tp_size,
+-                self.num_value_heads // self.tp_size,
+-            ],
+-            ["query", "key", "value", "z", "beta", "alpha"],
+-            0,
+-        )
++        if self.split_in_proj:
++            # Mint `in_proj.weight.<ckpt_name>` ShardedTensors from each independent split proj,
++            # so distcp on-disk layout is identical to non-split mode.
++            for proj_name, ckpt_split in self._split_proj_to_ckpt_name.items():
++                proj = getattr(self, proj_name)
++                proj_sd = sharded_state_dict_default(
++                    proj, f"{prefix}{proj_name}.", sharded_offsets, metadata
++                )
++                old_w_key = f"{prefix}{proj_name}.weight"
++                new_w_key = f"{prefix}in_proj.weight.{ckpt_split}"
++                assert old_w_key in proj_sd, (old_w_key, list(proj_sd.keys()))
++                sht_w = proj_sd[old_w_key]
++                sht_w.key = new_w_key
++                sharded_state_dict[new_w_key] = sht_w
++                old_b_key = f"{prefix}{proj_name}.bias"
++                if old_b_key in proj_sd:
++                    new_b_key = f"{prefix}in_proj.bias.{ckpt_split}"
++                    sht_b = proj_sd[old_b_key]
++                    sht_b.key = new_b_key
++                    sharded_state_dict[new_b_key] = sht_b
++
++            # in_proj_layer_norm: use sharded_state_dict_default to preserve Parameter
++            # identity for the distributed optimizer's param matching, then remap key
++            # to on-disk format.
++            ln_sd = sharded_state_dict_default(
++                self.in_proj_layer_norm,
++                f"{prefix}in_proj_layer_norm.",
++                sharded_offsets,
++                metadata,
++            )
++            ln_old_key = f"{prefix}in_proj_layer_norm.weight"
++            if ln_old_key in ln_sd:
++                ln_new_key = f"{prefix}in_proj.layer_norm_weight"
++                sht_ln = ln_sd[ln_old_key]
++                sht_ln.key = ln_new_key
++                sharded_state_dict[ln_new_key] = sht_ln
++
++        else:
++            # At this point the TP sharding is correctly defined for each tensor, but some of the
++            # tensors must be additionally split into separate parts
++            in_proj_dim_local_tp = self.in_proj_dim // self.tp_size
++            assert sharded_state_dict[f"{prefix}in_proj.weight"].data.size(0) == in_proj_dim_local_tp, (
++                in_proj_dim_local_tp,
++                sharded_state_dict[f"{prefix}in_proj.weight"],
++            )
++
++            sharded_state_dict[f"{prefix}in_proj.weight"] = _split_tensor_factory(
++                sharded_state_dict[f"{prefix}in_proj.weight"],
++                [
++                    self.qk_dim // self.tp_size,
++                    self.qk_dim // self.tp_size,
++                    self.v_dim // self.tp_size,
++                    self.v_dim // self.tp_size,
++                    self.num_value_heads // self.tp_size,
++                    self.num_value_heads // self.tp_size,
++                ],
++                ["query", "key", "value", "z", "beta", "alpha"],
++                0,
++            )
++
++            if f"{prefix}in_proj.bias" in sharded_state_dict:
++                sharded_state_dict[f"{prefix}in_proj.bias"] = _split_tensor_factory(
++                    sharded_state_dict[f"{prefix}in_proj.bias"],
++                    [self.qk_dim // self.tp_size, self.qk_dim // self.tp_size,
++                     self.v_dim // self.tp_size, self.v_dim // self.tp_size,
++                     self.num_value_heads // self.tp_size, self.num_value_heads // self.tp_size],
++                    ["query", "key", "value", "z", "beta", "alpha"], 0,
++                )
+ 
+         conv_layer_name_list = ["conv1d.weight"]
+         assert (
+diff --git a/megatron/training/checkpointing.py b/megatron/training/checkpointing.py
+--- a/megatron/training/checkpointing.py
++++ b/megatron/training/checkpointing.py
+@@ -801,6 +801,8 @@
+     # Arguments, iteration, and model.
+     state_dict = {}
+     state_dict['args'] = args
++    if getattr(args, 'gdn_len_ext_postinit_applied', False):
++        state_dict['gdn_len_ext_postinit_applied'] = True
+     state_dict['checkpoint_version'] = 3.0
+     if iteration is not None:
+         state_dict['iteration'] = iteration
+@@ -1614,6 +1616,11 @@
+         dtensor_state_dict = _to_dtensor(ddp_model, state_dict["model"])
+         state_dict["model"] = dtensor_state_dict
+ 
++    args.gdn_len_ext_postinit_applied = bool(state_dict.get(
++        'gdn_len_ext_postinit_applied',
++        getattr(state_dict.get('args'), 'gdn_len_ext_postinit_applied', False),
++    ))
++
+     # Set iteration.
+     if args.finetune or release:
+         iteration = 0
+diff --git a/megatron/training/gdn_spectralshift.py b/megatron/training/gdn_spectralshift.py
+new file mode 100644
+--- /dev/null
++++ b/megatron/training/gdn_spectralshift.py
+@@ -0,0 +1,110 @@
++# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: BSD-3-Clause
++# SpectralShift extraction: runtime logic only; no CLI registration or presets.
++
++import math
++import os
++
++from megatron.training.utils import print_rank_0
++
++APPLIED_KEY = 'gdn_len_ext_postinit_applied'
++
++
++def gdn_projection_lr_condition(args, previous=None):
++    """Non-unit GDN projection WEIGHT overrides; otherwise retain the old rule."""
++    multipliers = {
++        '.q_proj.weight': float(getattr(args, 'gdn_lr_mult_q', 1.0)),
++        '.k_proj.weight': float(getattr(args, 'gdn_lr_mult_k', 1.0)),
++        '.v_proj.weight': float(getattr(args, 'gdn_lr_mult_v', 1.0)),
++        '.a_proj.weight': float(getattr(args, 'gdn_lr_mult_alpha', 1.0)),
++        '.b_proj.weight': float(getattr(args, 'gdn_lr_mult_beta', 1.0)),
++    }
++    if any(not math.isfinite(value) or value < 0 for value in multipliers.values()):
++        raise ValueError('GDN projection LR multipliers must be finite and non-negative.')
++    if all(value == 1.0 for value in multipliers.values()):
++        return previous
++
++    def condition(name, parameter):
++        for suffix, multiplier in multipliers.items():
++            if name.endswith(suffix) and multiplier != 1.0:
++                return multiplier
++        return False if previous is None else previous(name, parameter)
++
++    return condition
++
++
++def validate_gdn_spectralshift_runtime(args, model):
++    """Keep the extracted path within the source implementation's runtime scope."""
++    modules = [m for shard in model for m in shard.modules()
++               if m.__class__.__name__ == 'GatedDeltaNet']
++    per_proj_lr = any(float(getattr(args, 'gdn_lr_mult_' + name, 1.0)) != 1.0
++                      for name in ('q', 'k', 'v', 'alpha', 'beta'))
++    centered = float(getattr(args, 'gdn_alpha_weight_scale', 1.0)) != 1.0
++    for module in modules:
++        if (per_proj_lr or centered) and not module.split_in_proj:
++            raise ValueError('SpectralShift weight/LR scaling requires split GDN projections.')
++        if not module.split_in_proj:
++            continue
++        if module.config.fp8:
++            raise ValueError('This SpectralShift patch does not support FP8 split projections.')
++        if any(getattr(args, name, False) for name in
++               ('use_megatron_fsdp', 'use_torch_fsdp2', 'use_custom_fsdp')):
++            raise ValueError('This SpectralShift patch targets MCore DDP, not FSDP.')
++        if centered and getattr(args, 'use_precision_aware_optimizer', False):
++            raise ValueError('This baseline cannot reload precision-aware optimizer master weights.')
++        if not getattr(module.config, 'gdn_fused_split_forward', False):
++            continue
++        param_overlap = getattr(args, 'overlap_param_gather', False)
++        grad_overlap = getattr(args, 'overlap_grad_reduce', False)
++        if param_overlap and not grad_overlap:
++            raise ValueError('Fused split parameter-gather overlap requires gradient-reduce overlap.')
++        if param_overlap or grad_overlap:
++            if (not getattr(args, 'use_distributed_optimizer', False)
++                    or getattr(args, 'num_distributed_optimizer_instances', 1) != 1
++                    or getattr(args, 'delay_wgrad_compute', False)
++                    or getattr(args, 'use_legacy_models', False)):
++                raise ValueError('Fused split overlap requires one MCore distributed optimizer '
++                                 'instance and delay_wgrad_compute=False.')
++
++
++def apply_gdn_spectralshift_postload(args, model, optimizer):
++    """Mutate alpha once after checkpoint loading, then synchronize master weights.
++
++    Preserve optimizer moments. Persist APPLIED_KEY in common checkpoint state.
++    The primitive in GatedDeltaNet preserves Parameter identity and uses FP32.
++    """
++    scale = float(getattr(args, 'gdn_alpha_weight_scale', 1.0))
++    mode = getattr(args, 'gdn_alpha_weight_scale_mode', 'matrix')
++    if scale == 1.0:
++        return
++    if not math.isfinite(scale) or scale < 0 or mode not in ('matrix', 'row'):
++        raise ValueError('Invalid centered alpha weight scale or mode.')
++    if getattr(args, APPLIED_KEY, False):
++        return
++
++    # Compatibility with checkpoints saved before the marker was introduced.
++    load_path = getattr(args, 'load', None)
++    save_path = getattr(args, 'save', None)
++    resume_paths = set()
++    if save_path:
++        resume_paths.update((os.path.realpath(save_path),
++                             os.path.realpath(os.path.join(save_path, 'non_persistent'))))
++    non_persistent = getattr(args, 'non_persistent_global_ckpt_dir', None)
++    if non_persistent:
++        resume_paths.add(os.path.realpath(non_persistent))
++    if load_path and os.path.realpath(load_path) in resume_paths:
++        setattr(args, APPLIED_KEY, True)
++        return
++
++    modified = 0
++    for shard in model:
++        for module in shard.modules():
++            if module.__class__.__name__ == 'GatedDeltaNet':
++                module.apply_split_alpha_weight_scale(alpha_scale=scale, mode=mode)
++                modified += 1
++    if optimizer is not None:
++        optimizer.reload_model_params()
++    # Set on every pipeline rank, including stages with no local GDN layer.
++    setattr(args, APPLIED_KEY, True)
++    print_rank_0(f'[SpectralShift] transformed {modified} local GDN alpha projections; '
++                 f'scale={scale}, mode={mode}')
+diff --git a/megatron/training/training.py b/megatron/training/training.py
+--- a/megatron/training/training.py
++++ b/megatron/training/training.py
+@@ -74,6 +74,10 @@
+ 
+ from megatron.core.distributed import finalize_model_grads
+ from megatron.core.enums import ModelType
++from megatron.training.gdn_spectralshift import (
++    gdn_projection_lr_condition, apply_gdn_spectralshift_postload,
++    validate_gdn_spectralshift_runtime,
++)
+ from megatron.core.optimizer import get_megatron_optimizer, OptimizerConfig
+ from megatron.core.optimizer.muon import get_megatron_muon_optimizer
+ from megatron.core.rerun_state_machine import (
+@@ -1179,6 +1183,8 @@
+ 
+     model = get_model(model_provider_func, model_type)
+     unwrapped_model = unwrap_model(model)
++    validate_gdn_spectralshift_runtime(args, unwrapped_model)
++    scale_lr_cond = gdn_projection_lr_condition(args, scale_lr_cond)
+ 
+     one_logger and one_logger.log_metrics({"app_build_optimzer_start_time": one_logger_utils.get_timestamp_in_ms()})
+     kwargs = {}
+@@ -1289,6 +1295,8 @@
+     else:
+         args.iteration = 0
+         args.num_floating_point_operations_so_far = 0
++
++    apply_gdn_spectralshift_postload(args, unwrapped_model, optimizer)
+ 
+     # get model without FP16 and/or DDP wrappers
+     if (

@@ -1,0 +1,13 @@
+{
+  "description": "Hashes of the inspected working-tree source files, including local modifications. Source repository contents and history are not included.",
+  "source_revision": "7d6b60342797e9ac808d9089608ee912915194ed",
+  "files": {
+    "megatron/core/ssm/gated_delta_net.py": "7e9851d57a42817ad90f4cf56a1be4cdca9f43948cd4b068ed52395c2f8f2519",
+    "megatron/training/training.py": "1449d45b9194b292a01cfc8f42c4d4e4a7ce88d343e905a5daba9c821f4e67a5",
+    "megatron/training/checkpointing.py": "71472a802ef83c34a7f846924417f9b46e4d1916aa8783a437cb57f49f421e0b",
+    "megatron/core/optimizer/__init__.py": "9ca92764bd3172f7c2384db23ac7e86f3ae7195bd1cccf450d2de3f8e5d44e5e",
+    "megatron/core/optimizer_param_scheduler.py": "3d64e68c1d1c51fb587125a1ffdf3d5ec719c3fa7e5c8f7828e4be69369f3a86",
+    "megatron/core/distributed/distributed_data_parallel.py": "14cff96261b26cfaf0e10eea7409901596d8d26150678005fa0f6bef6459565f",
+    "megatron/core/models/gpt/linear_attention_module_specs.py": "1640285df6c34828af22f7a7664496dc37f14f9a162dc62d607857e4cdfcb0a5"
+  }
+}

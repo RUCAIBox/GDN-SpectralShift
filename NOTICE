@@ -1,0 +1,36 @@
+SpectralShift — Megatron-LM runtime patch
+
+The patch retains the licenses of the source files it modifies. New repository
+documentation is BSD-3-Clause; see LICENSE.
+
+Apache-2.0 code:
+  megatron/core/ssm/gated_delta_net.py
+  Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+  Copyright (c) 2025, Songlin Yang, Jan Kautz, Ali Hatamizadeh.
+  The source credits code adopted from https://github.com/huggingface/transformers.
+  See LICENSES/Apache-2.0.txt.
+
+BSD-3-Clause code:
+  megatron/core/models/gpt/linear_attention_module_specs.py
+  megatron/core/optimizer/__init__.py
+  megatron/core/distributed/distributed_data_parallel.py
+  megatron/training/training.py
+  megatron/training/checkpointing.py
+  megatron/training/gdn_spectralshift.py (extracted/adapted runtime helpers)
+
+Relevant source notices include:
+  Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+  Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+  Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+  Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  See LICENSES/BSD-3-Clause-NVIDIA.txt.
+
+Modification notice: SpectralShift runtime logic has been extracted and adapted
+onto the public base identified in docs/base_manifest.json. The patch adds split
+projection execution, centered alpha scaling, optimizer multipliers, checkpoint
+metadata and DDP synchronization. It reorganizes training helpers and provides
+both fused-norm and plain projection module specs without CLI registration.
+
+The original training repository, its history, machine paths, model checkpoints,
+training data and manuscript PDF are not bundled. Source correspondence is
+recorded in docs/code_logic.md and docs/source_manifest.json.
