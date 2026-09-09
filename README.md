@@ -2,8 +2,12 @@
 
 **Effective Context Window Extension of Gated DeltaNet via Spectral Reparameterization**
 
+[![arXiv: Coming soon](https://img.shields.io/badge/arXiv-Coming%20soon-b31b1b)][arxiv-url]
 [![Megatron](https://img.shields.io/badge/Megatron--LM-runtime%20patch-76b900)](https://github.com/NVIDIA/Megatron-LM)
 [![License](https://img.shields.io/badge/License-BSD--3--Clause%20%2F%20Apache--2.0-blue)](NOTICE)
+
+<!-- When available, replace #citation below with the arXiv URL and update the badge's Coming%20soon label to the paper identifier. -->
+[arxiv-url]: #citation
 
 [Main results](#main-results) · [Patch](patches/megatron-spectralshift.patch) · [代码逻辑梳理（中文）](docs/code_logic.md) · [Base manifest](docs/base_manifest.json)
 
@@ -196,7 +200,7 @@ The implementation follows the manuscript *SpectralShift: Effective Context Wind
 }
 ```
 
-No public paper identifier or publication venue is asserted here. The manuscript PDF, model checkpoints and training data are not bundled.
+**arXiv: Coming soon.** The paper link will be added here once available. The manuscript PDF, model checkpoints and training data are not bundled.
 
 ## License and acknowledgments
 
