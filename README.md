@@ -17,7 +17,7 @@ For reference length $L_{\mathrm{ref}}$ and target length $L_{\mathrm{tar}}$, th
 
 $$
 s=\sqrt{L_{\mathrm{ref}}/L_{\mathrm{tar}}},\qquad
-\mu_\alpha=\operatorname{Mean}(W_\alpha),
+\mu_\alpha=\text{Mean}(W_\alpha),
 $$
 
 $$
@@ -30,7 +30,7 @@ $J$ is an all-ones matrix. The mean is taken over **each layer's complete alpha 
 GDN parameterizes retention as
 
 $$
-\alpha_t=\exp\!\left[-\exp(A_{\log})\,\operatorname{softplus}(W_\alpha h_t+b_{\mathrm{dt}})\right].
+\alpha_t=\exp\left[-\exp(A_{\log})\,\text{softplus}(W_\alpha h_t+b_{\mathrm{dt}})\right].
 $$
 
 Centering and scaling $W_\alpha$ changes input-dependent forgetting. Retention can increase or decrease according to the sign of the centered projection; the method reshapes the slow/fast spectral structure rather than uniformly increasing every gate. Applying SpectralShift does not require an SVD.
